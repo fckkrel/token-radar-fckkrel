@@ -16,7 +16,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, boardStats, boardStatsLines, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -85,7 +85,71 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
+/** A one-line census of the board's risk tiers, for the run log and for a
+ *  human checking the output without opening the dashboard. The census is
+ *  computed from the finished board, never from a draft, and it counts the
+ *  same tiers the dashboard's summary strip shows, so the log and the page
+ *  can never disagree about the board they describe. */
+function tierCensusLine(board: { risk_tier?: string }[], snapshot: { protocols: { slug: string; change_7d: number | null; chains: string[] }[] }): string {
+  const counts = { steady: 0, balanced: 0, hot: 0, fragile: 0 };
+  for (const row of board) {
+    const tier = (row as { risk_tier?: string }).risk_tier;
+    if (tier === 'steady' || tier === 'balanced' || tier === 'hot' || tier === 'fragile') counts[tier] += 1;
+  }
+  return `risk tiers: steady ${counts.steady}, balanced ${counts.balanced}, hot ${counts.hot}, fragile ${counts.fragile}`;
+}
+
+/** The board's top ten, as one log line, so a run's headline is checkable
+ *  without opening board.json. Only slugs and implied values are printed:
+ *  names are in the board itself, and the log stays short enough to read. */
+function topTenLine(board: { slug: string; implied_value_usd: number }[]): string {
+  return board.slice(0, 10).map((r, i) => `${i + 1}. ${r.slug} $${r.implied_value_usd.toLocaleString('en-US')}`).join(' | ');
+}
+
+/** The five biggest categories, as log lines, so a run's market shape is
+ *  checkable without opening the dashboard. The sentences are the same ones
+ *  the dashboard shows, copied from the radar data, so the log and the page
+ *  can never disagree about which category leads the board. */
+function categoryLines(radar: { category_top?: string[] }): string {
+  const lines = radar.category_top ?? [];
+  if (lines.length === 0) return 'token radar: categories: not listed';
+  return `token radar: categories:\n${lines.map((s) => `token radar:   ${s}`).join('\n')}`;
+}
+
+/** The board's headline statistics, as log lines, from the model's own
+ *  boardStats function. The log prints them after the top ten, so a run's
+ *  output tells a reader the board's size, its median row and its total
+ *  implied value without them opening a single file. */
+function statsLines(board: { slug: string; implied_value_usd: number; category: string | null; chains: string[] }[], snapshot: { watchlist: string[] }): string {
+  const stats = boardStats(board as never, snapshot as never);
+  return boardStatsLines(stats).map((s) => `token radar: ${s}`).join('\n');
+}
+
+/** A second, independent check that every dashboard row carries the risk
+ *  fields radar-2.1 promises. The gate checks the board; this checks the
+ *  dashboard's own data, so a missing tier is caught here, at build time,
+ *  instead of silently showing a blank badge in the page. The check also
+ *  requires an explanation of at least twenty characters, because a badge
+ *  without its sentence would leave the reader guessing what the tier means. */
+function dashboardRowsIssue(radar: { rows: { slug: string; risk_tier?: string; explanation?: string }[] }): string | null {
+  for (const r of radar.rows) {
+    if (!r.risk_tier) return `${r.slug} has no risk_tier in data.js`;
+    if (!r.explanation || r.explanation.length < 20) return `${r.slug} has no explanation in data.js`;
+  }
+  return null;
+}
+
+const dashboardIssue = dashboardRowsIssue(radar);
+if (dashboardIssue !== null) {
+  process.stderr.write(`token radar: the dashboard data is incomplete: ${dashboardIssue}\n`);
+  process.exit(1);
+}
+
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n` +
+    `token radar: top ten: ${topTenLine(board)}\n` +
+    `token radar: ${tierCensusLine(radar.rows as never, snapshot as never)}\n` +
+    `${categoryLines(radar)}\n` +
+    `${statsLines(board, snapshot)}\n`,
 );
