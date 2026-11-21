@@ -7,7 +7,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', chain: 'all', scope: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', risk: 'all', scope: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -38,6 +38,96 @@
     var cat = (model.category_multiple && model.category_multiple[row.category]) || model.default_multiple;
     var chainMult = 1 + Math.min(Math.max((row.chains || []).length - 1, 0), model.chain_cap) * model.chain_step;
     return Math.max(1, Math.round(row.tvl_usd * cat * growthMult * maturity * chainMult));
+  }
+
+  // Risk, in the page's own words, mirroring the model's radar-2.1 tiers.
+  // The page never invents a tier: it reads row.risk_tier, which the model
+  // computed from the snapshot, and only turns it into a badge and a sentence.
+  // A badge is a summary, not a verdict: steady is not safe, fragile is not
+  // doomed, and the farm plan is still the thing to follow, not the colour.
+  function tierLabel(tier) {
+    if (tier === 'steady') return 'Steady';
+    if (tier === 'hot') return 'Hot';
+    if (tier === 'fragile') return 'Fragile';
+    return 'Balanced';
+  }
+  function tierWarning(tier) {
+    if (tier === 'steady') return 'Steady means the figures behind this row have moved slowly. It is not a promise the token, if it launches, will be worth the implied value.';
+    if (tier === 'hot') return 'Hot means the implied value leans on a recent surge. A surge can reverse in a week, so hold only as long as the farm plan says and log every step.';
+    if (tier === 'fragile') return 'Fragile means the protocol is falling, young, or on one chain. Use the smallest capital the farm plan allows and do not extend the hold beyond the plan.';
+    return 'Balanced means no single input dominates this row. Check the farm plan against the protocol\'s own points page before committing capital.';
+  }
+  function growthLabel(band) {
+    if (band === 'falling') return 'falling';
+    if (band === 'rising') return 'rising';
+    if (band === 'surging') return 'surging';
+    return 'flat';
+  }
+  function tierBadge(row) {
+    var tier = row.risk_tier || 'balanced';
+    return el('span', { class: 'risk risk-' + tier, text: tierLabel(tier) });
+  }
+  // The summary strip under the lede: the tier census, in plain numbers.
+  // It answers the first question a reader asks of a ranked board — is the
+  // top of this board steady, or is it mostly hot and fragile? — without
+  // making them count the rows themselves.
+  function tierStrip() {
+    var census = DATA.tier_census || { steady: 0, balanced: 0, hot: 0, fragile: 0, top_ten_tiers: [] };
+    var top = (census.top_ten_tiers || []).map(tierLabel).join(', ');
+    return el('section', { class: 'panel tier-strip', 'aria-label': 'Risk summary' },
+      el('div', { class: 'tier-counts' },
+        el('div', { class: 'tier-count' }, el('b', { text: String(census.steady) }), el('span', { text: 'steady' })),
+        el('div', { class: 'tier-count' }, el('b', { text: String(census.balanced) }), el('span', { text: 'balanced' })),
+        el('div', { class: 'tier-count' }, el('b', { text: String(census.hot) }), el('span', { text: 'hot' })),
+        el('div', { class: 'tier-count' }, el('b', { text: String(census.fragile) }), el('span', { text: 'fragile' }))
+      ),
+      el('p', { class: 'sub', text: 'Risk tiers across all ' + DATA.board_size + ' rows. Top ten tiers: ' + (top || 'not listed') + '.' })
+    );
+  }
+  // Export the rows the reader is actually looking at — the filtered board,
+  // not the whole snapshot — as a CSV, so they can sort it in a spreadsheet
+  // without re-running the model. The file is built in the page, no network.
+  // The header names the risk fields too, so the exported sheet carries the
+  // same tier, band and chain count the board already shows. */
+  function exportCsv() {
+    var list = sortedRows(rows());
+    var head = ['rank', 'name', 'slug', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'risk_tier', 'growth_band'].join(',');
+    var lines = list.map(function (r) {
+      var cells = [r.rank, '"' + String(r.name).replace(/"/g, '""') + '"', r.slug, '"' + String(r.category || '').replace(/"/g, '""') + '"', '"' + (r.chains || []).join(';') + '"', r.tvl_usd, r.change_7d === null ? '' : r.change_7d, r.age_days === null ? '' : r.age_days, r.implied_value_usd, r.risk_tier || '', r.growth_band || ''];
+      return cells.join(',');
+    });
+    var blob = new Blob([[head].concat(lines).join('\n')], { type: 'text/csv' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'token-radar-board.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  // Copy one row's explanation to the clipboard, for a reader who wants to
+  // paste the figure-backed sentence into their own notes. Falls back to a
+  // prompt-free selection when the clipboard API is unavailable.
+  function copyExplanation(row) {
+    var text = row.explanation || (row.name + ' is ranked ' + row.rank + '.');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text);
+    }
+  }
+  // Keyboard shortcut: pressing "/" focuses the search box, so a reader
+  // already looking at the board can start filtering without touching the
+  // mouse. The shortcut is ignored while the reader is already typing in a
+  // field, or while the detail drawer is open, so it never steals a keystroke.
+  function bindSearchShortcut(searchInput) {
+    window.addEventListener('keydown', function (e) {
+      if (e.key !== '/') return;
+      var tag = (document.activeElement && document.activeElement.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+      if (dialog.open) return;
+      e.preventDefault();
+      searchInput.focus();
+    });
   }
 
   function el(tag, attrs) {
@@ -134,10 +224,22 @@
     return DATA.rows.filter(function (r) {
       if (state.category !== 'all' && r.category !== state.category) return false;
       if (state.chain !== 'all' && !(r.chains || []).includes(state.chain)) return false;
+      if (state.risk && state.risk !== 'all' && (r.risk_tier || 'balanced') !== state.risk) return false;
       if (!q) return true;
       var hay = [r.name, r.slug, r.category, (r.chains || []).join(' ')].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
     });
+  }
+  // The category strip under the tier strip: the five biggest categories, as
+  // sentences the model wrote, so the reader can see which part of the
+  // market the board is really about before they start filtering it.
+  function categoryStrip() {
+    var sentences = DATA.category_top || [];
+    if (sentences.length === 0) return null;
+    return el('section', { class: 'panel category-strip', 'aria-label': 'Biggest categories' },
+      el('h2', { text: 'Where the implied value sits' }),
+      el('ul', { class: 'category-list' }, sentences.map(function (s) { return el('li', { text: s }); }))
+    );
   }
   function sortedRows(list) {
     var key = state.sort;
@@ -182,8 +284,9 @@
 
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
-    var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain', value: state.q, 'aria-label': 'Search the board' });
+    var search = el('input', { type: 'search', id: 'q', placeholder: 'Search name, category or chain (press / to focus)', value: state.q, 'aria-label': 'Search the board' });
     search.addEventListener('input', function () { state.q = search.value; writeHash(); render(); });
+    bindSearchShortcut(search);
     var chains = Array.from(new Set(DATA.rows.flatMap(function (r) { return r.chains || []; }))).sort();
     var chainSelect = el('select', { id: 'chain', 'aria-label': 'Filter by chain' },
       el('option', { value: 'all', text: 'All chains' }),
@@ -197,11 +300,19 @@
     select.addEventListener('change', function () { state.category = select.value; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
+    var exportBtn = el('button', { class: 'button', type: 'button', text: 'Export CSV', onclick: function () { exportCsv(); } });
+    var riskSelect = el('select', { id: 'risk', 'aria-label': 'Filter by risk tier' },
+      el('option', { value: 'all', text: 'All risk tiers' }),
+      ['steady', 'balanced', 'hot', 'fragile'].map(function (t) { return el('option', { value: t, text: tierLabel(t), selected: state.risk === t ? 'selected' : null }); })
+    );
+    riskSelect.addEventListener('change', function () { state.risk = riskSelect.value; render(); });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
       el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSelect),
+      el('div', { class: 'field' }, el('label', { for: 'risk', text: 'Risk' }), riskSelect),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
+      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Filtered board' }), exportBtn),
       el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
     );
   }
@@ -247,6 +358,7 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
+        el('td', null, el('div', { class: 'risk-cell' }, tierBadge(r), el('span', { class: 'sub', text: (r.chain_count || (r.chains || []).length) + ' chains · ' + growthLabel(r.growth_band || 'flat') }))),
         el('td', null, el('span', { class: 'status', text: 'no token' }))
       );
       tbody.appendChild(tr);
@@ -262,6 +374,7 @@
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
             sortHeader('implied', 'Implied value'),
+            el('th', { scope: 'col', text: 'Risk' }),
             el('th', { scope: 'col', text: 'Token' })
           )),
           tbody
@@ -338,6 +451,13 @@
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Risk' }),
+      el('div', { class: 'risk-line' }, tierBadge(row), el('span', { class: 'sub', text: 'Growth: ' + growthLabel(row.growth_band || 'flat') + ' · Chains: ' + (row.chain_count || (row.chains || []).length) + ' · Age: ' + fmtAge(row.age_days) })),
+      el('p', { class: 'sub', text: row.explanation || '' }),
+      el('p', { class: 'sub', text: tierWarning(row.risk_tier || 'balanced') }),
+      el('button', { class: 'button', type: 'button', text: 'Copy explanation', onclick: function () { copyExplanation(row); } })
+    ));
+    dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
         var at = s.indexOf(' Cost: ');
@@ -358,6 +478,8 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    if (state.tab === 'pre-token') shell.appendChild(tierStrip());
+    if (state.tab === 'pre-token') { var catStrip = categoryStrip(); if (catStrip) shell.appendChild(catStrip); }
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());

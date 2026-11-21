@@ -100,6 +100,33 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 
 .model { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+
+/* Risk badges and the tier summary strip, new in radar-2.1.
+   The colours are the palette's own: accent green for steady, a warm amber
+   for hot, a red for fragile, and the muted ink for balanced. A badge is a
+   word first and a colour second, so it still reads without colour. */
+.tier-strip { margin-top: var(--step-4); padding: var(--step-4) var(--step-5); display: flex; flex-wrap: wrap; align-items: center; gap: var(--step-4); }
+.tier-counts { display: flex; flex-wrap: wrap; gap: var(--step-5); }
+.tier-count { display: flex; align-items: baseline; gap: var(--step-2); }
+.tier-count b { font-family: var(--font-num); font-size: 20px; font-weight: 600; }
+.tier-count span { color: var(--muted); font-size: 13px; }
+.tier-strip p { flex: 1 1 280px; }
+.risk { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; border: 1px solid var(--border); background: var(--canvas); color: var(--ink); }
+.risk-steady { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); color: var(--accent); }
+.risk-hot { background: #fdf3e0; border-color: #e8c87a; color: #8a5a00; }
+.risk-fragile { background: color-mix(in srgb, var(--negative) 10%, var(--surface)); border-color: color-mix(in srgb, var(--negative) 40%, var(--border)); color: var(--negative); }
+.risk-balanced { background: var(--canvas); color: var(--muted); }
+.risk-cell { display: grid; gap: 4px; align-content: start; }
+.risk-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--step-3); margin-bottom: var(--step-2); }
+.detail-section .button { margin-top: var(--step-3); }
+/* The category strip sits between the tier strip and the controls, so the
+   reader meets the market summary before the table, not after it. */
+.category-strip { margin-top: var(--step-4); padding: var(--step-4) var(--step-5); display: grid; gap: var(--step-2); }
+.category-strip h2 { font-size: 16px; }
+.category-list { margin: 0; padding-left: var(--step-5); display: grid; gap: var(--step-1); color: var(--muted); font-size: 13px; }
+@media (max-width: 900px) {
+  .tier-strip { flex-direction: column; align-items: flex-start; }
+}
 .empty { padding: var(--step-7) var(--step-5); text-align: center; display: grid; gap: var(--step-3); justify-items: center; }
 .empty p { color: var(--muted); }
 .button { min-height: 36px; padding: 0 var(--step-4); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); }
