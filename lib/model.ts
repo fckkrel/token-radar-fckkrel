@@ -107,7 +107,280 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-2.1';
+
+/** A risk tier for one row, read off the snapshot figures alone, never off a name.
+ *  The tier is a plain-language summary of how much of the implied value rests on
+ *  growth that has already happened, on a young protocol, or on a single chain.
+ *  It never changes the ranking: the board is still ordered by implied value only.
+ *  A tier is useful because a farmer's risk is not the same as a protocol's size:
+ *  a huge, flat, single-chain protocol and a smaller, fast-growing, multi-chain one
+ *  can share a rank and still need very different farm plans and hold times. */
+export type RiskTier = 'steady' | 'balanced' | 'hot' | 'fragile';
+
+/** The bands the tier, the dashboard badge and the detail drawer all read from.
+ *  Growth is the 7-day change, clamped the same way the model clamps it, so the
+ *  band and the multiplier can never disagree about the same protocol. */
+export function growthBand(change7d: number | null): 'falling' | 'flat' | 'rising' | 'surging' {
+  const g = change7d ?? 0;
+  if (g < -5) return 'falling';
+  if (g < 2) return 'flat';
+  if (g < 15) return 'rising';
+  return 'surging';
+}
+
+/** The age band, in the model's own words: young is under 90 days, seasoned is
+ *  over a year, and the middle band is everything in between. Unknown age is
+ *  treated as seasoned-middle, the same 365 days the model itself assumes. */
+export function ageBand(ageDays: number | null): 'young' | 'growing' | 'seasoned' {
+  const age = ageDays ?? 365;
+  if (age < 90) return 'young';
+  if (age < 365) return 'growing';
+  return 'seasoned';
+}
+
+/** How spread out a protocol is across chains: one chain is a single point of
+ *  failure, two or three is a normal multi-chain deployment, four or more is
+ *  genuinely diversified. The count is the snapshot's own chains array. */
+export function chainSpread(chains: string[]): 'single-chain' | 'multi-chain' | 'widely-spread' {
+  const n = chains.length;
+  if (n <= 1) return 'single-chain';
+  if (n <= 3) return 'multi-chain';
+  return 'widely-spread';
+}
+
+/** The risk tier, from the three bands above, in priority order.
+ *  Fragile first: a falling protocol that is also young is fragile whatever its
+ *  size, because both its price direction and its track record point the same way.
+ *  Hot next: a surging protocol is hot even when it is seasoned, because the
+ *  implied value leans on a move that may not repeat next week.
+ *  Steady last: a flat or rising, seasoned, multi-chain protocol is steady, and
+ *  everything else lands in the middle as balanced. */
+export function riskTierFor(p: SnapshotProtocol, age: number | null): RiskTier {
+  const growth = growthBand(p.change_7d);
+  const ageB = ageBand(age);
+  const spread = chainSpread(p.chains);
+  if (growth === 'falling' && ageB === 'young') return 'fragile';
+  if (growth === 'falling' && spread === 'single-chain') return 'fragile';
+  if (growth === 'surging') return 'hot';
+  if (growth === 'rising' && ageB === 'young') return 'hot';
+  if ((growth === 'flat' || growth === 'rising') && ageB === 'seasoned' && spread !== 'single-chain') return 'steady';
+  return 'balanced';
+}
+
+/** One row's score breakdown, in the same numbers the board and the detail
+ *  drawer already show, plus the three bands above. The breakdown exists so a
+ *  reader can see, without re-running the model, which input moved a row up or
+ *  down: a high category multiple, a growth multiplier above one, a maturity
+ *  multiplier below one, or a chain multiplier at its cap. */
+export interface ScoreBreakdown {
+  rank: number;
+  slug: string;
+  name: string;
+  tvl_usd: number;
+  implied_value_usd: number;
+  category_multiplier: number;
+  growth_multiplier: number;
+  maturity_multiplier: number;
+  chain_multiplier: number;
+  growth_band: 'falling' | 'flat' | 'rising' | 'surging';
+  age_band: 'young' | 'growing' | 'seasoned';
+  chain_spread: 'single-chain' | 'multi-chain' | 'widely-spread';
+  risk_tier: RiskTier;
+  /** The single biggest driver of this row's implied value, named in words. */
+  driver: string;
+  /** A one-sentence, figure-backed explanation of the row, for the detail drawer. */
+  explanation: string;
+}
+
+/** The biggest driver, chosen by which multiplier is furthest from one.
+ *  Category is the base, so it only wins when it is the top multiple; growth
+ *  wins on a big positive week; maturity wins on a very young or very old age;
+ *  chain wins only at the cap, where five extra chains are doing real work. */
+export function driverFor(categoryMult: number, growthMult: number, maturityMult: number, chainMult: number): string {
+  const moves: Array<[string, number]> = [
+    ['category', Math.abs(categoryMult - 0.25)],
+    ['growth', Math.abs(growthMult - 1)],
+    ['maturity', Math.abs(maturityMult - 1)],
+    ['chain breadth', Math.abs(chainMult - 1)],
+  ];
+  moves.sort((a, b) => b[1] - a[1]);
+  const top = moves[0]![0];
+  if (top === 'category') return 'category multiple';
+  if (top === 'growth') return 'seven-day growth';
+  if (top === 'maturity') return 'age and maturity';
+  return 'chain breadth';
+}
+
+/** Build one row's breakdown from the figures impliedValue already computed.
+ *  The explanation is deliberately boring: it restates the numbers, names the
+ *  driver, and names the tier, so a reader can check it against the board
+ *  without trusting any adjective. */
+export function breakdownFor(row: BoardRow, p: SnapshotProtocol): ScoreBreakdown {
+  const growth = growthBand(p.change_7d);
+  const ageB = ageBand(row.age_days);
+  const spread = chainSpread(p.chains);
+  const tier = riskTierFor(p, row.age_days);
+  const driver = driverFor(row.model.category_multiplier, row.model.growth_multiplier, row.model.maturity_multiplier, row.model.chain_multiplier);
+  const explanation =
+    `${row.name} is ranked ${row.rank} of the board with an implied value of $${row.implied_value_usd.toLocaleString('en-US')} ` +
+    `on $${row.tvl_usd.toLocaleString('en-US')} of TVL. Its biggest driver is ${driver}, its seven-day growth is ${growth}, ` +
+    `its age band is ${ageB}, and it is ${spread}. Risk tier: ${tier}.`;
+  return {
+    rank: row.rank,
+    slug: row.slug,
+    name: row.name,
+    tvl_usd: row.tvl_usd,
+    implied_value_usd: row.implied_value_usd,
+    category_multiplier: row.model.category_multiplier,
+    growth_multiplier: row.model.growth_multiplier,
+    maturity_multiplier: row.model.maturity_multiplier,
+    chain_multiplier: row.model.chain_multiplier,
+    growth_band: growth,
+    age_band: ageB,
+    chain_spread: spread,
+    risk_tier: tier,
+    driver,
+    explanation,
+  };
+}
+
+/** The board's tier census: how many rows fall in each risk tier, and which
+ *  tier the top ten belong to. The dashboard's summary strip reads this, so a
+ *  reader sees at a glance whether the top of the board is steady or hot. */
+export interface TierCensus {
+  steady: number;
+  balanced: number;
+  hot: number;
+  fragile: number;
+  top_ten_tiers: RiskTier[];
+}
+
+/** The board's category census: the five biggest categories by row count,
+ *  with their total implied value, so a reader can see at a glance whether
+ *  the board is dominated by curators, by RWA, or by something else entirely.
+ *  The census is a summary, never a ranking: it counts rows the board already
+ *  ranked, and it never moves a row. */
+export interface CategoryCensusRow {
+  category: string;
+  rows: number;
+  total_implied_value_usd: number;
+  top_slug: string;
+}
+
+/** Count the board by category, strongest total implied value first.
+ *  A category with one huge row and a category with many small rows can
+ *  share a total, so the census lists both the count and the total, and
+ *  names the top row in each category, so neither fact hides the other. */
+export function categoryCensus(board: BoardRow[]): CategoryCensusRow[] {
+  const byCategory = new Map<string, { rows: number; total: number; top: BoardRow }>();
+  for (const row of board) {
+    const key = row.category ?? 'Other';
+    const entry = byCategory.get(key);
+    if (!entry) {
+      byCategory.set(key, { rows: 1, total: row.implied_value_usd, top: row });
+    } else {
+      entry.rows += 1;
+      entry.total += row.implied_value_usd;
+      if (row.implied_value_usd > entry.top.implied_value_usd) entry.top = row;
+    }
+  }
+  return [...byCategory.entries()]
+    .map(([category, entry]) => ({
+      category,
+      rows: entry.rows,
+      total_implied_value_usd: entry.total,
+      top_slug: entry.top.slug,
+    }))
+    .sort((a, b) => b.total_implied_value_usd - a.total_implied_value_usd || (a.category < b.category ? -1 : 1))
+    .slice(0, 5);
+}
+
+/** One sentence per top category, for the dashboard's category strip.
+ *  The sentence names the category, its row count, its total implied value
+ *  and its top protocol, in that order, so a reader can compare categories
+ *  without opening the table. */
+export function categorySentences(board: BoardRow[]): string[] {
+  return categoryCensus(board).map(
+    (c) => `${c.category}: ${c.rows} rows, $${c.total_implied_value_usd.toLocaleString('en-US')} implied in total, led by ${c.top_slug}.`,
+  );
+}
+
+/** The board's headline statistics, in one object, for the run log and for
+ *  any reader who wants the board's shape without counting rows by hand.
+ *  Every figure is a count or a sum over the finished, ranked board, so the
+ *  statistics can never disagree with the board they describe. */
+export interface BoardStats {
+  rows: number;
+  watchlist_rows: number;
+  early_rows: number;
+  total_implied_value_usd: number;
+  median_implied_value_usd: number;
+  top_implied_value_usd: number;
+  bottom_implied_value_usd: number;
+  categories: number;
+  chains: number;
+}
+
+/** Compute the headline statistics from a finished board. The median is the
+ *  middle row's implied value, or the mean of the two middle rows when the
+ *  board has an even number of rows, so it is the board's own middle, not an
+ *  average pulled up by the top row's size. */
+export function boardStats(board: BoardRow[], snapshot: Snapshot): BoardStats {
+  const values = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
+  const mid = Math.floor(values.length / 2);
+  const median = values.length % 2 === 1 ? values[mid]! : Math.round(((values[mid - 1] ?? 0) + (values[mid] ?? 0)) / 2);
+  const categories = new Set(board.map((r) => r.category ?? 'Other')).size;
+  const chains = new Set(board.flatMap((r) => r.chains)).size;
+  return {
+    rows: board.length,
+    watchlist_rows: board.filter((r) => snapshot.watchlist.includes(r.slug)).length,
+    early_rows: board.filter((r) => !snapshot.watchlist.includes(r.slug)).length,
+    total_implied_value_usd: values.reduce((a, b) => a + b, 0),
+    median_implied_value_usd: median,
+    top_implied_value_usd: values[values.length - 1] ?? 0,
+    bottom_implied_value_usd: values[0] ?? 0,
+    categories,
+    chains,
+  };
+}
+
+/** The headline statistics as log lines, so a run's shape is checkable
+ *  without opening board.json or the dashboard. The lines are the same
+ *  figures the dashboard's lede shows, so the log and the page agree. */
+export function boardStatsLines(stats: BoardStats): string[] {
+  return [
+    `${stats.rows} rows (${stats.watchlist_rows} watchlist, ${stats.early_rows} early) across ${stats.categories} categories and ${stats.chains} chains`,
+    `total implied value $${stats.total_implied_value_usd.toLocaleString('en-US')}, median $${stats.median_implied_value_usd.toLocaleString('en-US')}, top $${stats.top_implied_value_usd.toLocaleString('en-US')}, bottom $${stats.bottom_implied_value_usd.toLocaleString('en-US')}`,
+  ];
+}
+
+/** Count the tiers across a finished board. The board must already be ranked;
+ *  the census never reorders anything, it only counts what is there. */
+export function tierCensus(board: BoardRow[], snapshot: Snapshot): TierCensus {
+  const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const census: TierCensus = { steady: 0, balanced: 0, hot: 0, fragile: 0, top_ten_tiers: [] };
+  board.forEach((row, i) => {
+    const p = index.get(row.slug);
+    if (!p) return;
+    const tier = riskTierFor(p, row.age_days);
+    census[tier] += 1;
+    if (i < 10) census.top_ten_tiers.push(tier);
+  });
+  return census;
+}
+
+/** A short, honest warning for a tier, shown beside the badge in the detail
+ *  drawer. Steady is not safe, it is only steadier; fragile is not doomed, it
+ *  only needs a smaller position and a shorter hold than the farm plan assumes.
+ *  The warning is deliberately the same wording the dashboard shows, so the
+ *  model's own text and the page's text can never drift apart in a later edit. */
+export function tierWarning(tier: RiskTier): string {
+  if (tier === 'steady') return 'Steady means the figures behind this row have moved slowly. It is not a promise the token, if it launches, will be worth the implied value.';
+  if (tier === 'balanced') return 'Balanced means no single input dominates this row. Check the farm plan against the protocol\'s own points page before committing capital.';
+  if (tier === 'hot') return 'Hot means the implied value leans on a recent surge. A surge can reverse in a week, so hold the position only as long as the farm plan says and log every step.';
+  return 'Fragile means the protocol is falling, young, or on one chain. Use the smallest capital the farm plan allows and do not extend the hold beyond the plan.';
+}
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 260;
@@ -150,7 +423,10 @@ export interface BoardRow {
   farm_steps: string[];
 }
 
-/** The dashboard's compact view of one row, with farm plans generated in the page. */
+/** The dashboard's compact view of one row, with farm plans generated in the page.
+ *  The risk fields are new in radar-2.1: they are derived from the same snapshot
+ *  figures as the implied value, they never change the ranking, and the dashboard
+ *  shows them as a badge, a band and a one-sentence explanation in the detail drawer. */
 export interface RadarRow {
   rank: number;
   slug: string;
@@ -167,6 +443,11 @@ export interface RadarRow {
   maturity_multiplier: number;
   category_multiplier: number;
   chain_multiplier: number;
+  risk_tier: RiskTier;
+  chain_count: number;
+  growth_band: 'falling' | 'flat' | 'rising' | 'surging';
+  age_band: 'young' | 'growing' | 'seasoned';
+  explanation: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -180,7 +461,9 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, and the model it runs.
+ *  The tier census is new in radar-2.1: a count of risk tiers across the board,
+ *  so the dashboard can summarise the top of the board without re-scoring it. */
 export interface RadarData {
   as_of: string;
   source: string;
@@ -193,6 +476,9 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  tier_census: TierCensus;
+  /** The five biggest categories, as one sentence each, for the dashboard. */
+  category_top: string[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -439,8 +725,14 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     }));
 }
 
-/** A board row's compact form for data.js, with the farm plan generated in the page. */
-export function radarRow(row: BoardRow): RadarRow {
+/** A board row's compact form for data.js, with the farm plan generated in the page.
+ *  The risk fields are computed here, in the model, not in the page: the page
+ *  only displays what the model already decided, so the badge and the board can
+ *  never disagree about the same row. The explanation is the breakdown's own
+ *  sentence, copied whole, so the detail drawer and the model say the same thing. */
+export function radarRow(row: BoardRow, snapshot: Snapshot): RadarRow {
+  const p = snapshot.protocols.find((x) => x.slug === row.slug);
+  const breakdown = p ? breakdownFor(row, p) : null;
   return {
     rank: row.rank,
     slug: row.slug,
@@ -457,10 +749,17 @@ export function radarRow(row: BoardRow): RadarRow {
     maturity_multiplier: row.model.maturity_multiplier,
     category_multiplier: row.model.category_multiplier,
     chain_multiplier: row.model.chain_multiplier,
+    risk_tier: breakdown ? breakdown.risk_tier : 'balanced',
+    chain_count: row.chains.length,
+    growth_band: breakdown ? breakdown.growth_band : growthBand(row.change_7d),
+    age_band: breakdown ? breakdown.age_band : ageBand(row.age_days),
+    explanation: breakdown ? breakdown.explanation : `${row.name} is ranked ${row.rank} with an implied value of $${row.implied_value_usd.toLocaleString('en-US')}.`,
   };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
+/** Everything the dashboard renders, from the snapshot.
+ *  The census is computed from the finished, ranked board, so it counts the
+ *  board the reader actually sees, not a draft of it. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
@@ -475,8 +774,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    rows: board.map(radarRow),
+    rows: board.map((r) => radarRow(r, snapshot)),
     live,
+    tier_census: tierCensus(board, snapshot),
+    category_top: categorySentences(board),
   };
   return { board, radar };
 }
